@@ -24,43 +24,59 @@ var (
 	// cert = kingpin.Flag("cert", "SSL certiticate file path").String()
 )
 
-// Our RerverseProxy object
+// rproxy is the authenticated ReverseProxy
 type rproxy struct {
-	proxy *httputil.ReverseProxy // instance of Go ReverseProxy that will do the job for us
+	proxy *httputil.ReverseProxy // stdlib ReverseProxy does the proxying
 }
 
-// factory
-func NewAuthProxy(target *url.URL) *rproxy {
-	return &rproxy{proxy: httputil.NewSingleHostReverseProxy(target)}
+// New returns an rproxy that acts as an authenticated reverse proxy for the given backend
+func New(backend *url.URL) *rproxy {
+	return &rproxy{proxy: httputil.NewSingleHostReverseProxy(backend)}
 }
 
-// Make Prox adhere to the Handler interface
+// Make rproxy adhere to the http.Handler interface
 func (p *rproxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Prepare an "unauthorized" response
+	unauthorized := func(bodyStr string) {
+		w.Header().Add("WWW-Authenticate", "Basic")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(bodyStr))
+	}
+	// forward the request to the actual reverse proxy
+	forward := func(resp http.ResponseWriter, req *http.Request, user string) {
+		// log.Println("Setting header as", "X-HTTP-USER", user)
+		r.Header.Set("X-HTTP-USER", user)
+		p.proxy.ServeHTTP(w, r)
+	}
+
 	user, pass, ok := r.BasicAuth()
 	if !ok {
-		w.Header().Add("WWW-Authenticate", "Basic")
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte("Missing basic auth credentials"))
+		unauthorized("Unable to extract basic auth credentials")
 		return
 	}
-	if user != *authuser || pass != *authpass {
-		w.Header().Add("WWW-Authenticate", "Basic")
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte("Incorrect auth credentials"))
+	if user == "" {
+		unauthorized("Missing username")
 		return
 	}
-	// Set header and let the request propagate
-	log.Println("Setting header as", "X-HTTP-USER", *authuser)
-	r.Header.Set("X-HTTP-USER", *authuser)
-	log.Println("Letting req through after setting header")
-	p.proxy.ServeHTTP(w, r)
+	if *authuser == "*" {
+		forward(w, r, user)
+		return
+	} else {
+		if user != *authuser || pass != *authpass {
+			unauthorized("Incorrect auth credentials")
+			return
+		} else {
+			forward(w, r, user)
+			return
+		}
+	}
 }
 
 func main() {
 	kingpin.Parse()
 
 	log.Println("Setting up handlers")
-	rproxy := NewAuthProxy(*backend)
+	rproxy := New(*backend)
 	logger := handlers.LoggingHandler(os.Stdout, rproxy)
 
 	log.Println("Starting reverse proxy server for", (*backend).String(), "on", *listen)
